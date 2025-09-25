@@ -52,8 +52,28 @@ class DockerClientPool:
         # Create pool of Docker clients
         for i in range(pool_size):
             try:
-                client = self.docker_module.from_env()
-                client.ping()
+                # Try different Docker connection methods for macOS compatibility
+                client = None
+                
+                # Try default connection first
+                try:
+                    client = self.docker_module.from_env()
+                    client.ping()
+                except Exception as e:
+                    # Try macOS Docker Desktop socket path
+                    try:
+                        import os
+                        user_home = os.path.expanduser("~")
+                        client = self.docker_module.DockerClient(base_url=f'unix://{user_home}/.docker/run/docker.sock')
+                        client.ping()
+                    except Exception as e2:
+                        # Try standard socket path
+                        try:
+                            client = self.docker_module.DockerClient(base_url='unix://var/run/docker.sock')
+                            client.ping()
+                        except Exception as e3:
+                            raise RuntimeError(f"Failed to create Docker client {i}: tried all connection methods")
+                
                 self.clients.append(client)
             except Exception as e:
                 raise RuntimeError(f"Failed to create Docker client {i}: {e}")
@@ -103,8 +123,37 @@ class LocalSandboxManager:
         
         # Initialize main Docker client for infrastructure
         try:
-            self.docker = self.docker_module.from_env()
-            self.docker.ping()
+            # Try different Docker connection methods for macOS compatibility
+            self.docker = None
+            docker_errors = []
+            
+            # Try default connection first
+            try:
+                self.docker = self.docker_module.from_env()
+                self.docker.ping()
+            except Exception as e:
+                docker_errors.append(f"from_env failed: {e}")
+                
+                # Try macOS Docker Desktop socket path
+                try:
+                    import os
+                    user_home = os.path.expanduser("~")
+                    self.docker = self.docker_module.DockerClient(base_url=f'unix://{user_home}/.docker/run/docker.sock')
+                    self.docker.ping()
+                except Exception as e2:
+                    docker_errors.append(f"user socket failed: {e2}")
+                    
+                    # Try standard socket path
+                    try:
+                        self.docker = self.docker_module.DockerClient(base_url='unix://var/run/docker.sock')
+                        self.docker.ping()
+                    except Exception as e3:
+                        docker_errors.append(f"standard socket failed: {e3}")
+                        raise RuntimeError(f"Docker is not running or accessible. Tried: {docker_errors}")
+            
+            if self.verbose:
+                print("✅ Docker connection established")
+                
         except Exception as e:
             raise RuntimeError(f"Docker is not running or accessible: {e}")
         
@@ -132,7 +181,7 @@ class LocalSandboxManager:
                 raise
         
         # Start proxy container
-        self.proxy_container_name = "sandbox-proxy"
+        self.proxy_container_name = PROXY_CONTAINER_NAME
         try:
             # Check if proxy container already exists
             existing = self.docker.containers.get(self.proxy_container_name)
@@ -165,6 +214,8 @@ class LocalSandboxManager:
                 'host.docker.internal': 'host-gateway'
             },
             environment={
+                'GATEWAY_URL': host_proxy_url,
+                'GATEWAY_HOST': 'host.docker.internal',
                 'RIDGES_API_URL': os.getenv('RIDGES_API_URL', 'http://localhost:8000'),
                 'RIDGES_PROXY_URL': host_proxy_url,
             }
@@ -460,9 +511,8 @@ class LocalSandbox:
             input_file = self.sandbox_dir / "input.json"
             input_file.write_text(sandbox_input.model_dump_json())
             
-            # Copy agent file to sandbox/src/ (matches production structure)
-            src_dir = self.sandbox_dir / "src"
-            agent_dest = src_dir / "agent.py"
+            # Copy agent file to sandbox root (where AGENT_RUNNER.py expects it)
+            agent_dest = self.sandbox_dir / "agent.py"
             shutil.copy2(self.agent_path, agent_dest)
             
             # Copy the agent_runner.py to sandbox root (matches production structure)

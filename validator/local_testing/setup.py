@@ -48,8 +48,34 @@ def setup_local_testing_environment():
         raise SystemExit("Docker Python library is required for local testing")
     
     try:
-        client = docker.from_env()
-        client.ping()
+        # Try different Docker connection methods for macOS compatibility
+        client = None
+        docker_errors = []
+        
+        # Try default connection first
+        try:
+            client = docker.from_env()
+            client.ping()
+        except Exception as e:
+            docker_errors.append(f"from_env failed: {e}")
+            
+            # Try macOS Docker Desktop socket path
+            try:
+                import os
+                user_home = os.path.expanduser("~")
+                client = docker.DockerClient(base_url=f'unix://{user_home}/.docker/run/docker.sock')
+                client.ping()
+            except Exception as e2:
+                docker_errors.append(f"user socket failed: {e2}")
+                
+                # Try standard socket path
+                try:
+                    client = docker.DockerClient(base_url='unix://var/run/docker.sock')
+                    client.ping()
+                except Exception as e3:
+                    docker_errors.append(f"standard socket failed: {e3}")
+                    raise e  # Re-raise original error
+        
         console.print("Docker is running", style="green")
     except DockerException as e:
         console.print("Docker is not running or accessible", style="bold red")
